@@ -8,3 +8,5 @@ double_udf = udf(slow_func)
 
 df = spark.read.parquet("/data/members")
 df = df.withColumn("new_col", double_udf(df["id"]))
+
+df = df.withColumn("new_col", double_udf(df["id"]))
