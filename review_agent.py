@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from google import genai
 
@@ -9,62 +10,80 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 GITHUB_REF = os.getenv("GITHUB_REF")
 
-# IMPORTANT: SDK reads GEMINI_API_KEY automatically from env
 client = genai.Client()
 
 
 # =========================
-# READ DIFF
+# READ FULL DIFF
 # =========================
 def get_diff():
     with open("diff.txt", "r", encoding="utf-8") as f:
-        diff = f.read()
-
-    return diff[:12000] if diff else None
+        return f.read()
 
 
 # =========================
-# RULE-BASED CHECKS
+# SPLIT DIFF BY FILE
 # =========================
-def rule_checks(diff):
-    issues = []
-    lower = diff.lower()
+def split_diff_by_file(diff_text):
+    """
+    Returns:
+    {
+        "file1.py": "diff...",
+        "file2.sql": "diff..."
+    }
+    """
 
-    if ".collect(" in diff:
-        issues.append("[HIGH] Avoid collect() in PySpark (driver overload risk)")
+    file_diffs = {}
+    current_file = None
+    buffer = []
 
-    if "select *" in lower:
-        issues.append("[MEDIUM] Avoid SELECT * usage")
+    for line in diff_text.splitlines():
+        # Detect file header
+        match = re.match(r"^\+\+\+ b/(.*)", line)
 
-    if "cross join" in lower:
-        issues.append("[HIGH] Cross join detected")
+        if match:
+            # Save previous file
+            if current_file and buffer:
+                file_diffs[current_file] = "\n".join(buffer)
 
-    if ".cache(" in diff and "unpersist" not in lower:
-        issues.append("[LOW] cache() used without unpersist")
+            current_file = match.group(1)
+            buffer = []
+            continue
 
-    return issues
+        if current_file:
+            buffer.append(line)
+
+    # last file
+    if current_file and buffer:
+        file_diffs[current_file] = "\n".join(buffer)
+
+    return file_diffs
 
 
 # =========================
-# GEMINI REVIEW (OFFICIAL SDK)
+# GEMINI FILE REVIEW
 # =========================
-def gemini_review(diff):
+def review_file(file_name, diff):
     prompt = f"""
-You are a senior data engineer reviewing a pull request.
+You are a senior data engineer reviewing ONE file in a PR.
+
+File: {file_name}
 
 Focus on:
 - PySpark performance issues
-- SQL optimization
-- schema design issues
-- YAML mistakes
+- SQL mistakes
+- schema risks
+- YAML issues
+- bad practices
 
-Return concise bullet points with severity.
+Return:
+- Bullet points
+- Severity (HIGH / MEDIUM / LOW)
 
 CODE DIFF:
-{diff}
+{diff[:12000]}
 """
 
-    # 🔥 THIS IS THE CORRECT CALL (from your snippet style)
     response = client.models.generate_content(
         model="gemini-3-flash-preview",
         contents=prompt
@@ -74,9 +93,9 @@ CODE DIFF:
 
 
 # =========================
-# POST COMMENT TO GITHUB
+# POST COMMENT TO PR
 # =========================
-def post_comment(text):
+def post_comment(comment):
     pr_number = GITHUB_REF.split("/")[-2]
 
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues/{pr_number}/comments"
@@ -86,14 +105,14 @@ def post_comment(text):
         "Accept": "application/vnd.github+json"
     }
 
-    requests.post(url, headers=headers, json={"body": text})
+    requests.post(url, headers=headers, json={"body": comment})
 
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("Starting AI Code Review...")
+    print("Starting AI Code Review (File-wise)...")
 
     diff = get_diff()
 
@@ -101,22 +120,28 @@ def main():
         print("No diff found")
         return
 
-    # Rule-based checks
-    rules = rule_checks(diff)
+    file_diffs = split_diff_by_file(diff)
 
-    # AI review (SDK)
-    ai_review = gemini_review(diff)
+    if not file_diffs:
+        print("No files detected in diff")
+        return
 
-    # Build comment
-    comment = "## 🤖 AI Code Review\n\n"
+    final_comment = "## 🤖 AI Code Review (File-wise)\n"
 
-    comment += "### ⚠️ Rule-Based Issues\n"
-    comment += "\n".join(rules) if rules else "No rule issues found."
+    # Review each file separately
+    for file_name, file_diff in file_diffs.items():
+        print(f"Reviewing: {file_name}")
 
-    comment += "\n\n### 🧠 Gemini Review\n"
-    comment += ai_review
+        try:
+            review = review_file(file_name, file_diff)
 
-    post_comment(comment)
+            final_comment += f"\n---\n### 📄 {file_name}\n"
+            final_comment += review + "\n"
+
+        except Exception as e:
+            final_comment += f"\n---\n### 📄 {file_name}\n⚠️ Review failed: {str(e)}\n"
+
+    post_comment(final_comment)
 
     print("Review completed.")
 
