@@ -1,6 +1,8 @@
 import os
 import requests
 from google import genai
+import time
+import random
 
 # =========================
 # CONFIG
@@ -52,27 +54,46 @@ def rule_checks(diff):
 # =========================
 def gemini_review(diff):
     prompt = f"""
-You are a senior data engineer.
+You are a senior data engineer reviewing a PR.
 
-Review this PR diff for:
-- PySpark performance issues
-- SQL anti-patterns
+Focus on:
+- PySpark performance
+- SQL issues
 - YAML issues
-- schema risks
-
-Return concise bullet points with severity.
 
 CODE:
 {diff}
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
+    model = "gemini-1.5-pro-001"
 
-    return response.text
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
 
+    for attempt in range(5):  # 🔥 retry 5 times
+        try:
+            response = requests.post(
+                url,
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+            if response.status_code == 503:
+                wait = (2 ** attempt) + random.random()
+                print(f"Model overloaded. Retrying in {wait:.2f}s...")
+                time.sleep(wait)
+                continue
+
+            print("Gemini error:", response.text)
+            return "AI review failed."
+
+        except Exception as e:
+            print("Error:", e)
+            time.sleep(2)
+
+    return "⚠️ AI unavailable after retries"
 
 # =========================
 # POST COMMENT
