@@ -17,5 +17,7 @@ joined = df.join(claims)
 
 result = joined.collect()
 
+result1 = result.collect()
+
 for r in result:
     print(r)
